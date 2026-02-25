@@ -1,26 +1,32 @@
 # Samsung Members Scraper + AI Classifier Pipeline
 
-This project is a two-stage pipeline for collecting and classifying Samsung Members forum posts:
+A two-stage data pipeline that scrapes Samsung Members forum posts and classifies them using an LLM/API-based classifier.
 
-1. **`scraper.py`** — scrapes Samsung Members post metadata/content into Excel
-2. **`llmclassifier.py`** — classifies scraped posts using an AI API and writes enriched output
+This project was built to automate the collection and labeling of Samsung Members posts for downstream analysis (e.g., issue categorization, topic tracking, and QA of scraped content).
 
-## Project Files
+---
 
-- `scraper.py` — Selenium scraper for Samsung Members pages/posts
-- `llmclassifier.py` — LLM/API-based classification pipeline
-- `requirements.txt` — Python dependencies
-- `.gitignore` — ignores secrets, cache files, and generated outputs
+## Overview
 
-## Features
+The pipeline is split into two scripts:
 
-- Scrapes post data such as title, snippet, full text, replies, and author fields
-- Supports multiple Samsung Members market endpoints (configurable in scraper settings)
-- Runs AI-based classification on scraped post text
-- Writes results to Excel for downstream analysis
+1. **`scraper.py`**  
+   Scrapes Samsung Members listing pages and post detail pages, then exports structured data to Excel.
 
-## Setup
+2. **`llmclassifier.py`**  
+   Reads the scraped Excel output, prepares text fields, and runs an AI API classifier to generate structured labels.
 
-### 1) Install dependencies
-```bash
-pip install -r requirements.txt
+---
+
+## Pipeline Flow
+
+```text
+Samsung Members pages
+        ↓
+   scraper.py (Selenium)
+        ↓
+ Structured Excel output (.xlsx)
+        ↓
+ llmclassifier.py (OpenAI API)
+        ↓
+ Classified / enriched Excel output (.xlsx)
