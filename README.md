@@ -20,6 +20,7 @@ The pipeline is split into two scripts:
 
 ## Pipeline Flow
 
+
 ```text
 Samsung Members pages
         ↓
@@ -30,3 +31,19 @@ Samsung Members pages
  llmclassifier.py (OpenAI API)
         ↓
  Classified / enriched Excel output (.xlsx)
+```
+## Sample Output Schema
+
+Example fields in the scraper output include:
+
+- `Title`
+- `Snippet`
+- `FullText`
+- `Replies`
+- `RepliesCount`
+- `AuthorName`
+
+The classifier script reads the scraper output, selects a text field (or fallback combination), and appends classification labels / metadata to a new Excel output.
+
+
+
