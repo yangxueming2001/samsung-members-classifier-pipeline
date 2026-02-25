@@ -1,645 +1,365 @@
-# =============================================================
-# Samsung Members Scraper (7 Markets) — Posts + Replies (Robust, Parallel)
-# Markets supported: SEIN (Indonesia), SEAU (Australia), TSE (Thailand),
-#                    SME (Malaysia), SESP (Singapore), SEPCO (Philippines), SENZ (New Zealand)
-# =============================================================
+# =========================
+# Samsung Members + AI Classifier Pipeline
+# =========================
+# pip install -U openai pandas openpyxl
+# Ensure OPENAI_API_KEY is set in environment.
 
-import os, re, time, math
+from __future__ import annotations
+import os, re, json, time, unicodedata
 import pandas as pd
-from urllib.parse import urljoin
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from openai import OpenAI
 
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+client = OpenAI()  # uses OPENAI_API_KEY
 
-# ---------------------------
-# SETTINGS (EDIT THESE)
-# ---------------------------
-MARKET = "SEIN"          # SEIN / SEAU / TSE / SME / SESP / SEPCO / SENZ
-START_PAGE = 51          # for single page, set START_PAGE = STOP_PAGE
-STOP_PAGE  = 55
-HEADLESS   = True
-N_WORKERS  = 4
+# ========= 1) CONFIG =========
+MODEL = "gpt-4.1-mini"
 
-# Optional: keep AuthorRaw for QA
-KEEP_AUTHOR_RAW = True
-
-# ---------------------------
-# MARKET CONFIG
-# ---------------------------
-BASE = "https://r1.community.samsung.com"
-
-MARKETS = {
-    # Indonesia
-    "SEIN": {
-        "sub_code": "SEIN",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/community/ct-p/id-community?page={p}&tab=recent_topics",
-            f"{BASE}/t5/community/bd-p/id-community?page={p}&tab=recent_topics",
-        ],
-    },
-    # Australia
-    "SEAU": {
-        "sub_code": "SEAU",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/community/ct-p/au-community?page={p}&tab=recent_topics",
-            f"{BASE}/t5/community/bd-p/au-community?page={p}&tab=recent_topics",
-        ],
-    },
-    # Thailand
-    "TSE": {
-        "sub_code": "TSE",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/community/ct-p/th-community?page={p}&tab=recent_topics",
-            f"{BASE}/t5/community/bd-p/th-community?page={p}&tab=recent_topics",
-        ],
-    },
-    # Malaysia
-    "SME": {
-        "sub_code": "SME",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/community/ct-p/my-community?page={p}&tab=recent_topics",
-            f"{BASE}/t5/community/bd-p/my-community?page={p}&tab=recent_topics",
-        ],
-    },
-    # Singapore
-    "SESP": {
-        "sub_code": "SESP",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/singapore/ct-p/sg?profile.language=en&page={p}&tab=recent_topics",
-            f"{BASE}/t5/singapore/bd-p/sg?profile.language=en&page={p}&tab=recent_topics",
-        ],
-    },
-    # Philippines
-    "SEPCO": {
-        "sub_code": "SEPCO",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/community/ct-p/ph-community?page={p}&tab=recent_topics",
-            f"{BASE}/t5/community/bd-p/ph-community?page={p}&tab=recent_topics",
-        ],
-    },
-    # New Zealand
-    "SENZ": {
-        "sub_code": "SENZ",
-        "listing_candidates": lambda p: [
-            f"{BASE}/t5/new-zealand/ct-p/nz?profile.language=en&tab=recent_topics&page={p}",
-            f"{BASE}/t5/new-zealand/bd-p/nz?profile.language=en&tab=recent_topics&page={p}",
-        ],
-    },
+# ======= Samsung Stars canon (hard-coded) =======
+STAR_CANON = {
+    "pntv1905","davidbui13","nguyennam","Jiyoon051","thaoxuka","Garam","SnehaTS","AmeetM","Jodsta",
+    "HS_NzAu","Dolgogi","mbckl","VueeyLe","Manue12","Dietta","Vee33","shelley_","photosbyraffy",
+    "Nessaslifestylediary","_nok_","djrules24","Yasmik","Cgers80","StephenMC","nxmah","duggle",
+    "abdurraim","BagusPrisandhy","AriMantep","anggazone08","Henders-","krisnugroho","bagusjpg",
+    "bayJoee","galaxyOD","KAKPJ","Uqiuqian","CaptainLynnnn","alinrizkiana","Alvitooo","mikaelrinto",
+    "fazri91","รςøгקเѻภ_ฝคгร","Kbbbb","Jeremyeyeguy","JamieGems","peeonurhead","TheAseanPrince",
+    "nattooh","SG_Yap","Wolfsbanee","Sukasblood","klausandfound","unclechan","23edl_","renwei89",
+    "nazzzz","jun4hong2","Tiganamploh","YOLO_CY","theroytravels","aliasyraf","Keryin","jonloo1126",
+    "Angpaologized","PPHATTARAPONG","ttoeytraveller","Bern2Hell","bagol1209","TimmyRose",
+    "SummeRamirez","MarkLuceño","LiezlNierves"
 }
 
-if MARKET not in MARKETS:
-    raise ValueError(f"Unsupported MARKET={MARKET}. Choose from: {', '.join(MARKETS)}")
-
-SUB_CODE = MARKETS[MARKET]["sub_code"]
-
-# ---------------------------
-# Desktop path (C:/D:/ + OneDrive)
-# ---------------------------
-def get_desktop_path() -> str:
-    candidates = []
-    home = os.path.expanduser("~")
-    candidates.append(os.path.join(home, "Desktop"))
-
-    one_drive = os.environ.get("OneDrive") or os.environ.get("ONEDRIVE")
-    if one_drive:
-        candidates.append(os.path.join(one_drive, "Desktop"))
-
-    for base in list(candidates):
-        if isinstance(base, str) and base.startswith("C:"):
-            candidates.append(base.replace("C:", "D:", 1))
-
-    for p in candidates:
-        if p and os.path.isdir(p):
-            return p
-
-    fallback = os.path.join(home, "Desktop")
-    os.makedirs(fallback, exist_ok=True)
-    return fallback
-
-desktop = get_desktop_path()
-if START_PAGE == STOP_PAGE:
-    OUTFILENAME = f"samsung_members_{MARKET.lower()}_page{START_PAGE:02}.xlsx"
-else:
-    OUTFILENAME = f"samsung_members_{MARKET.lower()}_page{START_PAGE:02}to{STOP_PAGE:02}.xlsx"
-OUTFILE = os.path.join(desktop, OUTFILENAME)
-
-# ---------------------------
-# Chrome setup (robust + eager)
-# ---------------------------
-def configure_chrome_options(headless: bool = True) -> Options:
-    opts = Options()
-
-    # Robust binary detection (C/D + x86/x64)
-    for path in [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"D:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"D:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]:
-        if os.path.isfile(path):
-            opts.binary_location = path
-            break
-
-    if headless:
-        opts.add_argument("--headless=new")
-
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1200,1800")
-    opts.add_argument("--disable-notifications")
-    opts.add_argument("--disable-extensions")
-    opts.add_argument("--blink-settings=imagesEnabled=false")
-    opts.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-    )
-    opts.add_experimental_option("prefs", {
-        "profile.managed_default_content_settings.images": 2
-    })
-
-    # Faster page return
-    opts.page_load_strategy = "eager"
-    return opts
-
-# Primary listing driver
-options = configure_chrome_options(HEADLESS)
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
-WAIT = WebDriverWait(driver, 20)
-
-# Reuse chromedriver path for workers
-CHROMEDRIVER_PATH = service.path
-
-# ---------------------------
-# Helpers
-# ---------------------------
-def normalize_url(href: str) -> str:
-    if not href:
+def _norm_name(s: str) -> str:
+    """Normalize usernames: lowercase, remove accents, trim punctuation, collapse spaces."""
+    if s is None:
         return ""
-    url = urljoin(BASE, str(href).strip())
-    # fix accidental double base
-    url = re.sub(r"^https://r1\.community\.samsung\.comhttps://", "https://", url)
-    return url
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii", errors="ignore")
+    s = s.lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    s = s.strip("@#-–—•*_|()[]{}:,;.!?\"'")
+    return s
 
-def accept_cookies_if_present(_driver):
-    try:
-        WebDriverWait(_driver, 5).until(
-            EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, "#onetrust-accept-btn-handler, button[aria-label*='Accept']")
-            )
-        ).click()
-        time.sleep(0.2)
-    except Exception:
-        pass
+SAMSUNG_STARS = { _norm_name(x) for x in STAR_CANON if _norm_name(x) }
 
-def force_full_timestamps(_driver):
-    """
-    Copy abbr[title] timestamp into visible text when present.
-    Helps markets that show relative labels in UI.
-    """
-    try:
-        _driver.execute_script("""
-            document.querySelectorAll('div.author abbr[title]').forEach(el=>{
-                const t = el.getAttribute('title');
-                if (t) el.innerText = t;
-            });
-        """)
-    except Exception:
-        pass
+MODERATOR_PATTERNS = [
+    re.compile(r"global_contents", re.I),
+    re.compile(r"\bsamsung\b", re.I),
+]
 
-def wait_for_tiles_or_retry(urls_for_page):
-    """
-    Try multiple listing URLs (ct-p / bd-p) until tiles are detected.
-    Returns (tile_selector, landed_url)
-    """
-    def load_and_detect(url):
-        driver.get(url)
-        accept_cookies_if_present(driver)
-        force_full_timestamps(driver)
+def classify_posted_by(author_name: str) -> str:
+    if not author_name:
+        return "Member"
+    norm = _norm_name(author_name)
+    if norm in SAMSUNG_STARS:
+        return "Samsung Star"
+    if any(p.search(author_name) for p in MODERATOR_PATTERNS):
+        return "Moderator"
+    return "Member"
 
-        for _ in range(2):  # short scrolls only
-            driver.execute_script("window.scrollBy(0, 900)")
-            time.sleep(0.2)
 
-        selectors = [
-            "article.samsung-message-tile",
-            "li.samsung-message-tile",
-            "div.samsung-message-tile",
-            ".lia-message-list .samsung-message-tile",
-        ]
+# ======= Canon product list =======
+CANON = [
+    "Galaxy S20","Galaxy S21","Galaxy S22","Galaxy S23","Galaxy S24","Galaxy S25",
+    "Galaxy Z Flip3","Galaxy Z Flip4","Galaxy Z Flip5","Galaxy Z Flip6","Galaxy Z Flip7",
+    "Galaxy Z Fold2","Galaxy Z Fold3","Galaxy Z Fold4","Galaxy Z Fold5","Galaxy Z Fold6","Galaxy Z Fold7",
+    "Galaxy Tab S6","Galaxy Tab S7","Galaxy Tab S8","Galaxy Tab S9","Galaxy Tab S10",
+    "Galaxy Tab A7","Galaxy Tab A8","Galaxy Tab A9","Galaxy Tab A10",
+    "Galaxy A01","Galaxy A02","Galaxy A03","Galaxy A04","Galaxy A05","Galaxy A06","Galaxy A10","Galaxy A11",
+    "Galaxy A12","Galaxy A13","Galaxy A14","Galaxy A15","Galaxy A16","Galaxy A20","Galaxy A21","Galaxy A22","Galaxy A23",
+    "Galaxy A24","Galaxy A25","Galaxy A26","Galaxy A2","Galaxy A30","Galaxy A31","Galaxy A32","Galaxy A33","Galaxy A34",
+    "Galaxy A35","Galaxy A36","Galaxy A50","Galaxy A51","Galaxy A52","Galaxy A53","Galaxy A54","Galaxy A55","Galaxy A56",
+    "Galaxy A70","Galaxy A71","Galaxy A72","Galaxy A73","Galaxy A7","Galaxy A80","Galaxy A9",
+    "Galaxy M02","Galaxy M10","Galaxy M11","Galaxy M12","Galaxy M14","Galaxy M15","Galaxy M20","Galaxy M21","Galaxy M22",
+    "Galaxy M23","Galaxy M30","Galaxy M31","Galaxy M32","Galaxy M33","Galaxy M34","Galaxy M51","Galaxy M52","Galaxy M53","Galaxy M54","Galaxy M62",
+    "Galaxy Watch 3","Galaxy Watch 4","Galaxy Watch 5","Galaxy Watch 6","Galaxy Watch 7","Galaxy Watch 8","Galaxy Watch FE","Galaxy Watch Ultra","Galaxy Watch Active",
+    "Galaxy Buds","Galaxy Buds 2","Galaxy Buds 3","Galaxy Buds FE","Galaxy Buds Live","Galaxy Buds Plus","Galaxy Buds Pro",
+    "Monitor","Soundbar","Refrigerator","Laundry","Air Conditioner","Vacuum Cleaner","Microwave",
+    "The Frame","The Serif","The Sero","The Premiere","The Freestyle","OLED","NEO QLED","QLED","Crystal UHD"
+]
 
-        def any_tiles(drv):
-            for sel in selectors:
-                if drv.find_elements(By.CSS_SELECTOR, sel):
-                    return sel
-            return False
-
-        sel = WebDriverWait(driver, 12).until(lambda d: any_tiles(d))
-        return sel, url
-
-    last_exc = None
-    for u in urls_for_page:
-        try:
-            return load_and_detect(u)
-        except Exception as e:
-            last_exc = e
-
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("Failed to load listing page.")
-
-NBSP = "\u00A0"
-def clean_snippet(text: str) -> str:
-    if not isinstance(text, str) or not text:
-        return ""
-    txt = text.replace(NBSP, " ")
-    txt = re.sub(
-        r"View\s*Post\s*\d+\s*Views\s*\d+\s*Replies\s*\d+\s*Like(?:s)?",
-        "",
-        txt,
-        flags=re.IGNORECASE,
-    )
-    txt = re.sub(r"View\s*Post[\s\S]*?Like(?:s)?", "", txt, flags=re.IGNORECASE)
-    return " ".join(txt.split()).strip()
-
-# Legacy fallback parser (text split)
-def parse_author_field(author_raw: str):
-    lines = [ln.strip() for ln in str(author_raw).split("\n") if ln.strip()]
-    author = date_part = time_part = category = ""
-    if lines:
-        author = lines[0]
-        for ln in lines:
-            m = re.search(r"(\d{2}-\d{2}-\d{4})\s+(\d{2}:\d{2}\s+(?:AM|PM))", ln, flags=re.I)
-            if m:
-                date_part, time_part = m.group(1), m.group(2)
-                break
-            m2 = re.search(r"(\d{2}-\d{2}-\d{4})", ln)
-            if m2 and not date_part:
-                date_part = m2.group(1)
-        category = lines[-1] if len(lines) > 1 else ""
-    return pd.Series([author, date_part, time_part, category])
-
-def extract_author_meta_from_tile(tile):
-    """
-    DOM-first extractor:
-      - AuthorRaw = div.author innerText
-      - AuthorName: a.login -> a.lia-user-name-link -> a.username -> a[rel='author'] -> any user-profile link
-      - Date/Time: abbr[title] or <time>, regex fallback on AuthorRaw
-      - Category: last non-user <a> in div.author
-    Returns: (author_name, date_part, time_part, category, author_raw)
-    """
-    author_name = date_part = time_part = category = ""
-    author_raw = ""
-
-    try:
-        ablock = tile.find_element(By.CSS_SELECTOR, "div.author")
-        author_raw = (ablock.text or "").strip()
-
-        # 1) AuthorName (DOM-first)
-        author_selectors = [
-            "a.login",
-            "a.lia-user-name-link",
-            "a.username",
-            "a[rel='author']",
-            "a[href*='/t5/user/']",
-            "a[href*='/user/viewprofilepage']",
-        ]
-        for sel in author_selectors:
-            try:
-                for el in ablock.find_elements(By.CSS_SELECTOR, sel):
-                    txt = (el.text or "").strip()
-                    if txt:
-                        author_name = txt
-                        raise StopIteration
-            except StopIteration:
-                break
-            except Exception:
-                pass
-
-        # Fallback to first non-empty line of AuthorRaw if still missing
-        if not author_name and author_raw:
-            lines = [x.strip() for x in author_raw.split("\n") if x.strip()]
-            if lines:
-                author_name = lines[0]
-
-        # 2) Date / Time (abbr[title] or <time>)
-        stamp = ""
-        try:
-            t_candidates = ablock.find_elements(By.CSS_SELECTOR, "abbr[title], time")
-            for t in t_candidates:
-                stamp = (t.get_attribute("title") or t.text or "").strip()
-                if stamp:
-                    break
-        except Exception:
-            pass
-
-        # Fallback parse from raw text
-        if not stamp:
-            stamp = author_raw
-
-        m = re.search(r"(\d{2}-\d{2}-\d{4})\s+(\d{2}:\d{2}\s+(?:AM|PM))", stamp, flags=re.I)
-        if m:
-            date_part, time_part = m.group(1), m.group(2)
+def build_category_map(products):
+    m = {}
+    for p in products:
+        low = p.lower()
+        if "z flip" in low:
+            m[p] = "Galaxy Z Flip"
+        elif "z fold" in low:
+            m[p] = "Galaxy Z Fold"
+        elif re.search(r"\bs\d{2}\b", low):
+            m[p] = "Galaxy S"
+        elif "tab s" in low:
+            m[p] = "Galaxy Tab S"
+        elif "tab a" in low:
+            m[p] = "Galaxy Tab A"
+        elif re.search(r"\ba\d{1,2}\b", low):
+            m[p] = "Galaxy A"
+        elif re.search(r"\bm\d{1,2}\b", low):
+            m[p] = "Galaxy M"
+        elif "watch" in low:
+            m[p] = "Galaxy Watch"
+        elif "buds" in low:
+            m[p] = "Galaxy Buds"
+        elif "monitor" in low:
+            m[p] = "Monitor"
+        elif "soundbar" in low:
+            m[p] = "Soundbar"
+        elif "refrigerator" in low:
+            m[p] = "Refrigerator"
+        elif "laundry" in low:
+            m[p] = "Laundry"
+        elif "microwave" in low:
+            m[p] = "Microwave"
+        elif "air conditioner" in low or "aircon" in low or "air-con" in low:
+            m[p] = "Air Conditioner"
+        elif "vacuum" in low:
+            m[p] = "Vacuum Cleaner"
         else:
-            # if only absolute date exists
-            m2 = re.search(r"(\d{2}-\d{2}-\d{4})", stamp)
-            if m2:
-                date_part = m2.group(1)
-            # relative times ("6m ago", "3h ago", "2 days ago") intentionally left blank
+            m[p] = "Others"
+    return m
 
-        # 3) Category = last non-user link in div.author
+CATEGORY_MAP = build_category_map(CANON)
+
+def assign_category(product_name: str) -> str:
+    if not product_name:
+        return "Others"
+    if product_name in CATEGORY_MAP:
+        return CATEGORY_MAP[product_name]
+    for known, cat in CATEGORY_MAP.items():
+        if known.lower() in product_name.lower():
+            return cat
+    return "Others"
+
+
+# ========= 2) AI Prompt (Subtopics + Topic mapping) =========
+SUBTOPICS = [
+  "Contest","Events","Information","Competitor","Agent","Promo",
+  "Price / Purchase Inquiry","Recommendation","Shipping","Warranty","Accessories",
+  "Software","Camera","Screen / Display","AI","Battery / Charging","Account",
+  "Performance","Connectivity / Network","Audio / Calls","Storage / Memory","Design","Apps","Others"
+]
+
+PROMPT_GUIDE = f"""
+You are an expert annotator of Samsung Members / Samsung Community forum posts.
+Return ONLY a valid JSON object with key "items" = array of results.
+Each array element MUST be an object with keys:
+- i: integer index of the input line
+- ss_product: most specific Samsung product model discussed (e.g. "Galaxy S24 Ultra"). If none, "No specific product".
+- product_category: one of ["Galaxy S","Galaxy Z Flip","Galaxy Z Fold","Galaxy Tab S","Galaxy Tab A","Galaxy A","Galaxy M","Galaxy Watch","Galaxy Buds","Monitor","Soundbar","Refrigerator","Laundry","Air Conditioner","Vacuum Cleaner","Microwave","Others"]
+- subtopic: choose EXACTLY one from: {SUBTOPICS}
+- topic: choose based on subtopic (EXACT strings):
+  * Contest -> "Contest"
+  * Events, Information -> "News"
+  * Competitor -> "Competitor"
+  * Promo -> "Promo"
+  * Price / Purchase Inquiry, Recommendation, Shipping -> "Purchase & Orders"
+  * Agent -> "Service"
+  * Warranty, Accessories, Software, Camera, Screen / Display, AI, Battery / Charging, Account,
+    Performance, Connectivity / Network, Audio / Calls, Storage / Memory, Design, Apps
+    -> "Product (Support)"
+  * If the post is a review / test / general impressions and does NOT contain help-seeking cues
+    ("how to","please help","need help","need advice","seek support","bug","fix","error code","is it possible")
+    -> "Product (General)"
+  * Otherwise -> "Others"
+- sentiment: one of ["Positive","Negative","Neutral","Mix"]
+  * Neutral = factual/informative/acknowledgment only
+  * Mix = clear positive AND negative cues (esp. with connectors "but","however","though","although","yet","nevertheless","still")
+- brand_terms: array of Samsung products/families/categories mentioned (deduplicate; keep specificity)
+
+Guardrails:
+1) Decide subtopic first, then topic from mapping.
+2) Be as specific as possible for ss_product; do not output generic "Smartphone" if a model can be inferred.
+3) brand_terms should include ALL relevant Samsung product mentions, not only the main one.
+4) Output JSON only.
+""".strip()
+
+
+# ========= 3) Classify a batch in JSON mode =========
+def _clip(s, max_len=1000):
+    s = "" if s is None else str(s)
+    return s if len(s) <= max_len else s[:max_len]
+
+def classify_batch_json_mode_ai(texts, model=MODEL, sleep=0.3):
+    numbered = "\n\n".join([f"[{i}] {_clip(t)}" for i, t in enumerate(texts)])
+    chat = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": PROMPT_GUIDE},
+            {"role": "user", "content": f"Classify these lines and return JSON with key 'items'. Align using 'i':\n\n{numbered}"},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0
+    )
+
+    items = []
+    try:
+        data = json.loads(chat.choices[0].message.content)
+        items = data.get("items", [])
+    except Exception:
+        items = []
+
+    by_i = {}
+    for it in items:
         try:
-            links = ablock.find_elements(By.CSS_SELECTOR, "a")
-            for link in reversed(links):
-                txt = (link.text or "").strip()
-                if not txt:
-                    continue
-                cls = (link.get_attribute("class") or "")
-                href = (link.get_attribute("href") or "")
-
-                # Skip user/profile links
-                if ("login" in cls) or ("UserAvatar" in cls):
-                    continue
-                if ("/t5/user/" in href) or ("/user/viewprofilepage" in href):
-                    continue
-
-                category = txt
-                break
+            i = int(it.get("i"))
         except Exception:
-            pass
+            continue
 
-    except Exception:
-        pass
+        ss_prod = str(it.get("ss_product", "")).strip()
+        cat_ai  = str(it.get("product_category", "")).strip()
+        cat_det = assign_category(ss_prod) if (ss_prod and ss_prod != "No specific product") else (cat_ai or "Others")
 
-    return author_name, date_part, time_part, category, author_raw
+        brand_terms = it.get("brand_terms", [])
+        if not isinstance(brand_terms, list):
+            brand_terms = []
 
-def month_from_date(date_str: str) -> str:
-    """
-    Expects MM-dd-yyyy. If missing/relative => Unknown.
-    No inference across month boundaries.
-    """
-    try:
-        m = int(str(date_str).split("-")[0])
-        months = ["Unknown","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        return months[m] if 1 <= m <= 12 else "Unknown"
-    except Exception:
-        return "Unknown"
+        by_i[i] = {
+            "ss_product": ss_prod,
+            "product_category": cat_det,
+            "sentiment": str(it.get("sentiment", "Neutral")).strip(),
+            "topic": str(it.get("topic", "Others")).strip(),
+            "subtopic": str(it.get("subtopic", "Others")).strip(),
+            "brand_terms": brand_terms,
+        }
 
-# ---------------------------
-# Detail page fetch (single-driver function)
-# ---------------------------
-def fetch_post_and_replies_with_driver(drv, url: str):
-    """
-    Returns (full_post_text, replies_text_concat, replies_count)
-    """
-    try:
-        drv.get(url)
-        accept_cookies_if_present(drv)
+    out = []
+    for i in range(len(texts)):
+        out.append(by_i.get(i, {
+            "ss_product": "No specific product",
+            "product_category": "Others",
+            "sentiment": "Neutral",
+            "topic": "Others",
+            "subtopic": "Others",
+            "brand_terms": []
+        }))
 
-        WebDriverWait(drv, 8).until(
-            EC.presence_of_element_located((
-                By.CSS_SELECTOR, "#bodyDisplay, #messageView2, .lia-message-view-wrapper"
-            ))
-        )
-
-        # Expand truncation if present (2x max for speed)
-        for _ in range(2):
-            try:
-                more = drv.find_element(
-                    By.CSS_SELECTOR,
-                    "a.lia-message-read-more, a.lia-truncate-read-more, button[aria-controls*='truncate']"
-                )
-                drv.execute_script("arguments[0].click();", more)
-                time.sleep(0.15)
-            except Exception:
-                break
-
-        # Main post body (first body-content block)
-        post_blocks = drv.find_elements(
-            By.CSS_SELECTOR,
-            "#bodyDisplay .lia-message-body-content, "
-            "#messageView2 .lia-message-body-content, "
-            ".lia-message-view-wrapper .lia-message-body-content"
-        )
-        main_txt = ""
-        if post_blocks:
-            t = (post_blocks[0].get_attribute("innerText") or "").strip()
-            if t:
-                main_txt = "\n".join(ln.strip() for ln in t.splitlines() if ln.strip())
-
-        # Replies (exclude first message)
-        reply_blocks = drv.find_elements(
-            By.CSS_SELECTOR,
-            ".linear-message-list .lia-message-view:not(.first-message) .lia-message-body-content, "
-            ".custom-reply .lia-message-body-content"
-        )
-        replies = []
-        for r in reply_blocks:
-            t = (r.get_attribute("innerText") or "").strip()
-            if t:
-                replies.append(t)
-
-        return main_txt, " || ".join(replies), len(replies)
-
-    except Exception:
-        # Defensive fallback
-        try:
-            alt = drv.find_element(By.CSS_SELECTOR, ".lia-quilt-column-main-content, .lia-quilt-row-main")
-            t = (alt.get_attribute("innerText") or "").strip()
-            t = "\n".join(ln.strip() for ln in t.splitlines() if ln.strip())
-            return t[:20000], "", 0
-        except Exception:
-            return "", "", 0
-
-# ---------------------------
-# Worker driver (parallel)
-# ---------------------------
-def new_worker_driver():
-    opts = configure_chrome_options(True)  # workers always headless
-    d = webdriver.Chrome(service=Service(CHROMEDRIVER_PATH), options=opts)
-
-    # Block heavy resources (best-effort)
-    try:
-        d.execute_cdp_cmd("Network.enable", {})
-        d.execute_cdp_cmd("Network.setBlockedURLs", {
-            "urls": [
-                "*.png","*.jpg","*.jpeg","*.gif","*.webp","*.svg",
-                "*.woff","*.woff2","*.ttf","*.otf",
-                "*.mp4","*.webm","*.avi","*.mkv",
-                "*.css"  # optional, but faster
-            ]
-        })
-    except Exception:
-        pass
-
-    d.set_page_load_timeout(15)
-    return d
-
-def worker(urls_chunk):
-    drv = new_worker_driver()
-    out = {}
-    try:
-        for u in urls_chunk:
-            out[u] = fetch_post_and_replies_with_driver(drv, u)
-    finally:
-        try:
-            drv.quit()
-        except Exception:
-            pass
+    if sleep:
+        time.sleep(sleep)
     return out
 
-# ---------------------------
-# MAIN — 1) Crawl listing pages and collect unique URLs
-# ---------------------------
-all_rows = []
-seen_urls = set()
 
-t0 = time.perf_counter()
+# ========= 4) Helpers: open excel, find author column =========
+def open_excel_file(path: str) -> pd.ExcelFile:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Input file not found: {path}")
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+        return pd.ExcelFile(path, engine="openpyxl")
+    raise ValueError(f"Unsupported file extension '{ext}'. Use a decrypted .xlsx")
 
-for page in range(START_PAGE, STOP_PAGE + 1):
-    page_urls = MARKETS[MARKET]["listing_candidates"](page)
-    print(f"\n=== {MARKET} Listing page {page} ===")
+def find_author_column(df: pd.DataFrame) -> str | None:
+    # robust: supports AuthorName
+    targets = {"author", "username", "authorname", "author name"}
+    for c in df.columns:
+        norm = re.sub(r"[\s_]+", "", str(c).strip().lower())
+        if norm in targets:
+            return c
+    return None
 
-    try:
-        tile_selector, landed = wait_for_tiles_or_retry(page_urls)
-        print(f"✓ Landed: {landed} | selector: {tile_selector}")
-    except Exception as e:
-        print(f"× Could not load tiles for page {page}: {e}")
-        continue
+def find_replies_column(df: pd.DataFrame) -> str | None:
+    # flexible
+    keys = ["repliescount", "replycount", "commentcount", "comments", "replies"]
+    for c in df.columns:
+        norm = re.sub(r"[\s_]+", "", str(c).strip().lower())
+        if norm in keys:
+            return c
+    return None
 
-    tiles = driver.find_elements(By.CSS_SELECTOR, tile_selector)
-    print(f"Found {len(tiles)} tiles on page {page}")
 
-    for post in tiles:
-        try:
-            # Title + URL
-            a = post.find_element(By.CSS_SELECTOR, "h3 a")
-            title = (a.text or "").strip()
-            href = normalize_url(a.get_attribute("href") or "")
+# ========= 5) PIPELINE (with progress) =========
+def run_pipeline(in_path: str,
+                 text_col_pref=("Full text (EN)", "Combined Text (EN)"),
+                 verbose: bool = True) -> str:
+    xl = open_excel_file(in_path)
+    processed = {}
 
-            if not href or href in seen_urls:
-                continue
-            seen_urls.add(href)
+    total_sheets = len(xl.sheet_names)
+    if verbose:
+        print(f"📘 Input file: {in_path}")
+        print(f"📄 Sheets: {total_sheets} -> {', '.join(xl.sheet_names)}")
+        print(f"⭐ Samsung Stars loaded (canon): {len(SAMSUNG_STARS)}")
 
-            # Snippet
-            try:
-                snippet = (post.find_element(By.CSS_SELECTOR, "div.content-wrapper").text or "").strip()
-            except Exception:
-                snippet = ""
+    t0 = time.time()
 
-            # Author metadata (DOM-first + fallback)
-            author_name, date_part, time_part, category, author_raw = extract_author_meta_from_tile(post)
+    for idx, sh in enumerate(xl.sheet_names, start=1):
+        t_sheet = time.time()
+        df = xl.parse(sh)
+        n_rows = len(df)
 
-            if (not author_name or not category) and author_raw:
-                s = parse_author_field(author_raw)
-                author_name = author_name or (s.iloc[0] if len(s) > 0 else "")
-                date_part   = date_part   or (s.iloc[1] if len(s) > 1 else "")
-                time_part   = time_part   or (s.iloc[2] if len(s) > 2 else "")
-                category    = category    or (s.iloc[3] if len(s) > 3 else "")
+        if verbose:
+            print(f"\n[{idx}/{total_sheets}] ▶ Sheet '{sh}' ({n_rows} rows)")
 
-            # Counts
-            def get_int(css):
+        # Text column selection
+        text_col = next((c for c in text_col_pref if c in df.columns), None)
+        if not text_col:
+            # attempt build Combined Text (EN)
+            title_col = next((c for c in df.columns if "title" in c.lower()), None)
+            body_col  = next((c for c in df.columns if any(k in c.lower() for k in ["full text","snippet","content","body"])), None)
+            df["Combined Text (EN)"] = df.apply(
+                lambda r: " ".join([s for s in [str(r.get(title_col,"")), str(r.get(body_col,""))] if str(s).strip()]).strip(),
+                axis=1
+            )
+            text_col = "Combined Text (EN)"
+
+        texts = df[text_col].fillna("").astype(str).tolist()
+
+        # AI classify
+        if verbose:
+            print(f"   - Classifying via {MODEL} ... ", end="", flush=True)
+        t_cls = time.time()
+        rows = classify_batch_json_mode_ai(texts)
+        if verbose:
+            print(f"done ({time.time()-t_cls:.1f}s)")
+
+        df["SS Product"]       = [r["ss_product"] for r in rows]
+        df["Product Category"] = [r["product_category"] for r in rows]
+        df["Sentiment"]        = [r["sentiment"] for r in rows]
+        df["Topic"]            = [r["topic"] for r in rows]
+        df["Subtopic"]         = [r["subtopic"] for r in rows]
+        df["Brand Terms"]      = ["; ".join(r["brand_terms"]) for r in rows]
+
+        # Posted By (AuthorName supported)
+        author_c = find_author_column(df)
+        if verbose:
+            print(f"   - Posted By from: {author_c if author_c else '(none -> Member)'}")
+        df["Posted By"] = df[author_c].fillna("").astype(str).apply(classify_posted_by) if author_c else "Member"
+
+        # Replied (Y/N)
+        replies_c = find_replies_column(df)
+        if replies_c:
+            def replied_flag(v):
                 try:
-                    txt = (post.find_element(By.CSS_SELECTOR, css).text or "").strip()
-                    txt = re.sub(r"[^\d]", "", txt)
-                    return int(txt) if txt else 0
+                    return "N" if float(v) == 0 else "Y"
                 except Exception:
-                    return 0
+                    return "N"
+            df["Replied (Y/N)"] = df[replies_c].apply(replied_flag)
+            if verbose:
+                zero = (pd.to_numeric(df[replies_c], errors="coerce").fillna(0) == 0).sum()
+                print(f"   - Replied (Y/N) from '{replies_c}' (zero: {zero})")
+        else:
+            df["Replied (Y/N)"] = "N"
+            if verbose:
+                print("   - Replied (Y/N): replies column not found -> default N")
 
-            views    = get_int("li.samsung-tile-views b")
-            comments = get_int("li.samsung-tile-replies b")
-            likes    = get_int("li.samsung-tile-kudos b")
+        processed[sh] = df
+        if verbose:
+            print(f"✅ Finished '{sh}' in {time.time()-t_sheet:.1f}s")
 
-            row = {
-                "Title": title,
-                "URL": href,
-                "AuthorName": author_name,
-                "Date": date_part,
-                "Time": time_part,
-                "Category": category,
-                "Likes": likes,
-                "Comments": comments,
-                "Views": views,
-                "Snippet": snippet,
-                "ListingPage": page,
-            }
-            if KEEP_AUTHOR_RAW:
-                row["AuthorRaw"] = author_raw
+    out_path = os.path.splitext(in_path)[0] + "_classified_ai.xlsx"
+    if verbose:
+        print(f"\n💾 Writing output → {out_path}")
 
-            all_rows.append(row)
+    with pd.ExcelWriter(out_path, engine="openpyxl") as w:
+        for sh, df in processed.items():
+            df.to_excel(w, sheet_name=sh, index=False)
 
-        except Exception as e:
-            print("Tile parse error:", e)
+    if verbose:
+        print(f"🎉 Done in {time.time()-t0:.1f}s")
+    return out_path
 
-# Build dataframe
-df = pd.DataFrame(all_rows)
 
-# ---------------------------
-# 2) Transform / clean
-# ---------------------------
-if not df.empty:
-    df["Month"] = df["Date"].apply(month_from_date)
-    df["Sub"] = SUB_CODE
-    df["Snippet"] = df["Snippet"].apply(clean_snippet)
-
-# Listing timing
-t1 = time.perf_counter()
-print(f"\n⏱ Listing phase done in {t1 - t0:.1f}s | rows={len(df)}")
-
-# ---------------------------
-# 3) Fetch FULL post text + Replies (PARALLEL)
-# ---------------------------
-# Close listing driver before worker drivers spawn (reduces resource usage)
-try:
-    driver.quit()
-except Exception:
-    pass
-
-full_texts, replies_texts, replies_counts = [], [], []
-
-urls = df["URL"].tolist() if (not df.empty and "URL" in df.columns) else []
-if urls:
-    # Round-robin chunk split
-    chunks = [urls[i::N_WORKERS] for i in range(N_WORKERS)]
-
-    print(f"Starting detail fetch with {N_WORKERS} workers for {len(urls)} URLs...")
-    t2 = time.perf_counter()
-
-    results = {}
-    with ThreadPoolExecutor(max_workers=N_WORKERS) as ex:
-        futures = [ex.submit(worker, chunk) for chunk in chunks if chunk]
-        done_n = 0
-        for fut in as_completed(futures):
-            batch = fut.result()
-            results.update(batch)
-            done_n += len(batch)
-            print(f"  ...detail progress: {done_n}/{len(urls)}")
-
-    # Stitch back in original order
-    for i, u in enumerate(urls, start=1):
-        main_txt, rep_txt, rep_cnt = results.get(u, ("", "", 0))
-        full_texts.append(main_txt)
-        replies_texts.append(rep_txt)
-        replies_counts.append(rep_cnt)
-
-    t3 = time.perf_counter()
-    print(f"⏱ Detail phase done in {t3 - t2:.1f}s")
-
-    df["FullText"] = full_texts
-    df["Replies"] = replies_texts
-    df["RepliesCount"] = replies_counts
-
-# ---------------------------
-# 4) Save to Desktop
-# ---------------------------
-df.to_excel(OUTFILE, index=False)
-
-t_end = time.perf_counter()
-print(f"\n✅ Saved -> {OUTFILE}")
-print(f"Rows: {len(df)} | Pages: {START_PAGE}..{STOP_PAGE} | Market: {MARKET}")
-print(f"⏱ Total runtime: {t_end - t0:.1f}s")
+# ========= 6) RUN =========
+if __name__ == "__main__":
+    # IMPORTANT: use your decrypted input excel here
+    in_path = r"C:\Users\xueming.y\Desktop\test2.xlsx"
+    print("🚀 Running Samsung Members classification...")
+    out_path = run_pipeline(in_path, verbose=True)
+    print("📦 Saved:", out_path)
