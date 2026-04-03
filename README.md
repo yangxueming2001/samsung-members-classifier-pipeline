@@ -13,6 +13,7 @@ Classifies posts using OpenAI API into structured labels (product category, topi
 Outputs analysis-ready Excel datasets used in client-facing reports that informed cross-country business decisions
 
 Impact
+
 Reduced data collection time from ~2 weeks to ~2 hours (~95% reduction)
 # Samsung Members Scraper + AI Classifier Pipeline
 
