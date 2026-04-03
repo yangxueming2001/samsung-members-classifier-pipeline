@@ -1,8 +1,11 @@
 Samsung Members Scraper & AI Classification Pipeline
 
 Built to replace a manual 2-week forum data collection process at a marketing agency managing Samsung's APAC social listening across 8 markets. The pipeline scrapes ~10,000 posts per run and automatically classifies them by topic, sentiment, and product category — enabling weekly diagnostic reports delivered to Samsung's regional teams.
+
 What it solves
+
 Manual collection was too slow for weekly reporting cycles and couldn't scale across 8 country forums with inconsistent site structures.
+
 What it does
 
 Scrapes listing and post detail pages via Selenium, handling pagination, infinite scroll, and relative timestamps across regions
