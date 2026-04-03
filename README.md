@@ -1,32 +1,40 @@
 Samsung Members Scraper & AI Classification Pipeline
 Built to replace a manual 2-week forum data collection process at a marketing agency managing Samsung's APAC social listening across 8 markets. The pipeline scrapes ~10,000 posts per run and automatically classifies them by topic, sentiment, and product category — enabling weekly diagnostic reports delivered to Samsung's regional teams.
 
-What it solves: Manual collection was too slow for weekly reporting cycles and couldn't scale across 8 country forums with inconsistent site structures.
+What it solves: 
+Manual collection was too slow for weekly reporting cycles and couldn't scale across 8 country forums with inconsistent site structures.
 
 What it does:
-
 Scrapes listing and post detail pages via Selenium, handling pagination, infinite scroll, and relative timestamps across regions
 Classifies posts using OpenAI API into structured labels (product category, topic, sentiment)
 Outputs analysis-ready Excel datasets used in client-facing reports that informed cross-country business decisions
 
 Impact: Reduced data collection time from ~2 weeks to ~2 hours (~95% reduction)
 
+
+
 The pipeline is split into two scripts:
 1. scraper.py Scrapes Samsung Members listing pages and post detail pages, then exports structured data to Excel.
 2. llmclassifier.py Reads the scraped Excel output, prepares text fields, and runs an AI API classifier to generate structured labels.
+
 Pipeline Flow
 
 
 
 Samsung Members pages
+
         ↓
    scraper.py (Selenium)
+   
         ↓
  Structured Excel output (.xlsx)
+ 
         ↓
  llmclassifier.py (OpenAI API)
+ 
         ↓
  Classified / enriched Excel output (.xlsx)
+ 
 
  
 Sample Output Schema
