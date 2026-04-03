@@ -8,3 +8,27 @@ Classifies posts using OpenAI API into structured labels (product category, topi
 Outputs analysis-ready Excel datasets used in client-facing reports that informed cross-country business decisions
 
 Impact: Reduced data collection time from ~2 weeks to ~2 hours (~95% reduction)
+
+The pipeline is split into two scripts:
+1. scraper.py Scrapes Samsung Members listing pages and post detail pages, then exports structured data to Excel.
+2. llmclassifier.py Reads the scraped Excel output, prepares text fields, and runs an AI API classifier to generate structured labels.
+Pipeline Flow
+
+Samsung Members pages
+        ↓
+   scraper.py (Selenium)
+        ↓
+ Structured Excel output (.xlsx)
+        ↓
+ llmclassifier.py (OpenAI API)
+        ↓
+ Classified / enriched Excel output (.xlsx)
+Sample Output Schema
+Example fields in the scraper output include:
+* Title
+* Snippet
+* FullText
+* Replies
+* RepliesCount
+* AuthorName
+The classifier script reads the scraper output, selects a text field (or fallback combination), and appends classification labels / metadata to a new Excel output.
